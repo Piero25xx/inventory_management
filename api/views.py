@@ -1,4 +1,4 @@
-from rest_framework import viewsets, permissions, status, filters
+from rest_framework import generics, viewsets, permissions, status, filters
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.response import Response
 from rest_framework.decorators import action
@@ -6,7 +6,13 @@ from django.db.models import Sum
 from django.contrib.auth.models import User
 from .models import InventoryItem, InventoryChange
 from .serializers import UserSerializer, InventoryItemSerializer, InventoryChangeSerializer
+from rest_framework.pagination import PageNumberPagination
+from .pagination import InventoryItemPagination 
 
+class RegisterView(generics.CreateAPIView):
+    queryset = User.objects.all()
+    permission_classes = (permissions.AllowAny,)
+    serializer_class = UserSerializer
 
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
@@ -28,20 +34,37 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(quantity__lte=min_quantity)
         return queryset
 
+                # Filter by price range
+        min_price = self.request.query_params.get('min_price', None)
+        max_price = self.request.query_params.get('max_price', None)
+        if min_price is not None:
+            queryset = queryset.filter(price__gte=float(min_price))
+        if max_price is not None:
+            queryset = queryset.filter(price__lte=float(max_price))
+        if max_price is not None:
+            queryset = queryset.filter(price__lte=float(max_price))
+                    
+                    # Filter by low stock
+        low_stock = self.request.query_params.get('low_stock', None)
+        if low_stock is not None:
+            queryset = queryset.filter(quantity__lte=int(low_stock))   
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
     def perform_update(self, serializer):
-        instance = self.get_object()
-        old_quantity = instance.quantity
-        new_quantity = serializer.validated_data.get('quantity', old_quantity)
         
-        serializer.save()
+        # Get the old quantity before saving
+        old_quantity = serializer.instance.quantity
         
-        if new_quantity != old_quantity:
+        # Save the updated instance
+        instance = serializer.save(user=self.request.user)
+        
+        # Create inventory change record if quantity changed
+        if old_quantity != instance.quantity:
             InventoryChange.objects.create(
                 item=instance,
-                quantity_changed=new_quantity - old_quantity,
+                previous_quantity=old_quantity,
+                new_quantity=instance.quantity,
                 user=self.request.user
             )
 
@@ -54,6 +77,13 @@ class InventoryItemViewSet(viewsets.ModelViewSet):
 class InventoryChangeViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = InventoryChangeSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = InventoryItemPagination
 
     def get_queryset(self):
-        return InventoryChange.objects.filter(item__user=self.request.user)
+        return InventoryChange.objects.filter(
+            item__user=self.request.user
+        ).order_by('-date_changed')
+
+
+class InventoryItemPagination(PageNumberPagination):
+    page_size = 10
